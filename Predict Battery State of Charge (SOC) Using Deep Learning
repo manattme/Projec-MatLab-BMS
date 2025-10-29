@@ -1,0 +1,146 @@
+%% Setup Environment
+% Predict Battery State of Charge (SOC) Using Deep Learning
+% CPU-only version (no GPU required)
+clc; clear; close all
+disp("🚀 Starting Battery SOC Prediction Project (CPU mode)")
+
+%% Download and Extract Dataset
+% Source: Mendeley Data (LG_HG2_Prepared_Dataset_McMasterUniversity_Jan_2020)
+% This downloads and unzips the dataset to your system temp folder.
+url = "https://data.mendeley.com/public-files/datasets/cp3473x7xv/files/ad7ac5c9-2b9e-458a-a91f-6f3da449bdfb/file_downloaded";
+downloadFolder = tempdir;
+outputFolder = fullfile(downloadFolder,"LGHG2@n10C_to_25degC");
+
+if ~exist(outputFolder,"dir")
+    fprintf("Downloading LGHG2 dataset... ");
+    filename = fullfile(downloadFolder,"LGHG2@n10C_to_25degC.zip");
+    websave(filename,url);
+    unzip(filename,outputFolder);
+    fprintf("✅ Done.\n");
+else
+    fprintf("Dataset already exists at: %s\n", outputFolder);
+end
+
+% Show expected subfolders (Train/Test)
+folderTrain = fullfile(outputFolder,"Train");
+folderTest  = fullfile(outputFolder,"Test");
+assert(isfolder(folderTrain) && isfolder(folderTest), "Expected Train/Test folders not found under %s", outputFolder);
+
+%% Prepare Datastore
+% Read .mat files and transform into {X, Y} cell pairs for training
+fdsTrain = fileDatastore(folderTrain, ReadFcn=@load);
+fdsTest  = fileDatastore(folderTest,  ReadFcn=@load);
+
+% Training datastore returns {predictors, targets}
+dsTrain = transform(fdsTrain, @(data) {data.X, data.Y});
+
+% Use first training entry as validation data (you can change as needed)
+dsVal = subset(dsTrain,1);
+
+% Test datastores: predictors-only and targets-only
+tdsPredictorsTest = transform(fdsTest, @(data) {data.X});
+tdsTargetsTest    = transform(fdsTest, @(data) {data.Y});
+
+% Quick preview
+disp("Preview of training sample (size of X and Y):");
+p = preview(dsTrain);
+disp(size(p{1})); % predictors size
+disp(size(p{2})); % targets size
+disp("✅ Datastore ready.")
+
+%% Define Neural Network Layers
+% 5 features: [Voltage, Current, Temperature, AvgVoltage(500s), AvgCurrent(500s)]
+% 1 response: SOC (0..1)
+numFeatures       = 5;
+numResponses      = 1;
+numHiddenNeurons  = 55;
+
+layers = [
+    sequenceInputLayer(numFeatures, Normalization="zerocenter")
+    fullyConnectedLayer(numHiddenNeurons)
+    tanhLayer
+    fullyConnectedLayer(numHiddenNeurons)
+    leakyReluLayer(0.3)
+    fullyConnectedLayer(numResponses)
+    clippedReluLayer(1)   % constrain output to [0,1]
+];
+disp("✅ Network defined successfully.")
+
+%% Train the Network
+% Training options for CPU-only environment
+epochs         = 1200;
+miniBatchSize  = 1;
+InitialLR      = 0.01;
+LRDropPeriod   = 400;
+LRDropFactor   = 0.1;
+valFrequency   = 30;
+
+options = trainingOptions("adam", ...
+    InputDataFormats="CTB", ...
+    MaxEpochs=epochs, ...
+    SequencePaddingDirection="left", ...
+    Shuffle="every-epoch", ...
+    GradientThreshold=1, ...
+    InitialLearnRate=InitialLR, ...
+    LearnRateSchedule="piecewise", ...
+    LearnRateDropPeriod=LRDropPeriod, ...
+    LearnRateDropFactor=LRDropFactor, ...
+    ValidationData=dsVal, ...
+    ValidationFrequency=valFrequency, ...
+    MiniBatchSize=miniBatchSize, ...
+    Plots="training-progress", ...
+    Metrics="rmse", ...
+    Verbose=0, ...
+    ExecutionEnvironment="cpu");  % Force CPU execution
+
+% Train with mean-squared-error regression loss
+net = trainnet(dsTrain, layers, "mse", options);
+disp("✅ Training complete.")
+
+%% Predict and Evaluate Results
+% Make predictions on test sequences and compare with targets
+YPred   = minibatchpredict(net, tdsPredictorsTest, InputDataFormats="CTB", MiniBatchSize=1, UniformOutput=false);
+YTarget = readall(tdsTargetsTest);
+
+% Plot predictions vs targets for different ambient temperatures
+figure("Name","SOC Prediction vs Target")
+tiledlayout(2,2)
+temps = ["-10°C","0°C","10°C","25°C"];
+for i = 1:min(4, numel(YPred))
+    nexttile
+    plot(YPred{i}); hold on; plot(YTarget{i});
+    legend(["Predicted","Target"],"Location","best")
+    xlabel("Time (s)"); ylabel("SOC")
+    title("Temperature " + temps(i))
+    grid on
+end
+
+% Compute RMSE(%) and Max Error(%)
+Err  = cellfun(@(p,t) p - t, YPred, YTarget, "UniformOutput", false);
+RMSE = cellfun(@(e) sqrt(mean(e.^2))*100, Err);
+MAXE = cellfun(@(e) max(abs(e))*100, Err);
+
+fprintf("\nRMSE (%%) by Temperature:\n");
+for i = 1:numel(RMSE)
+    fprintf("  %s : %.2f\n", temps(i), RMSE(i));
+end
+fprintf("\nMAX Error (%%) by Temperature:\n");
+for i = 1:numel(MAXE)
+    fprintf("  %s : %.2f\n", temps(i), MAXE(i));
+end
+
+% Bar charts
+figure("Name","RMSE and Max Error by Temperature")
+tiledlayout(2,1)
+nexttile
+bar([-10,0,10,25], RMSE(1:4))
+ylabel("RMSE (%)"); title("RMSE by Temperature"); grid on
+nexttile
+bar([-10,0,10,25], MAXE(1:4))
+ylabel("Max Error (%)"); xlabel("Temperature (°C)"); title("Max Error by Temperature"); grid on
+
+%% Tips & Next Steps
+% - You can try LSTM/GRU by replacing the middle layers with lstmLayer/gruLayer.
+% - If training is slow, reduce 'epochs' (e.g., 300) for a quick smoke test.
+% - To export this to Simulink, save 'net' and use the 'Predict' block (Deep Learning Toolbox).
+
