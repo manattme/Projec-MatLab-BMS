@@ -1,0 +1,182 @@
+%% Predict Battery SOC using Advanced Basic Neural Network (Local Download Folder, No Toolbox)
+% Multi-layer + Adam optimizer + Learning rate schedule + Real-time plot + CSV save
+% Works with base MATLAB (no Deep Learning Toolbox needed)
+
+clc; clear; close all
+disp("🚗 Starting Advanced Basic SOC Prediction (Local Data Mode - BatteryDataDownload)")
+
+%% Step 1. ตั้งค่าเส้นทางข้อมูลในเครื่อง
+% 👇 ใช้ path ตามที่ผู้ใช้ระบุ
+outputFolder = "C:\Users\PF3309A8\Documents\MATLAB\BatteryDataDownload";
+
+if ~exist(outputFolder,"dir")
+    error("❌ ไม่พบโฟลเดอร์ข้อมูล กรุณาตรวจสอบ path ให้ถูกต้อง");
+else
+    fprintf("✅ ใช้ชุดข้อมูลในเครื่องที่: %s\n", outputFolder);
+end
+
+folderTrain = fullfile(outputFolder,"Train");
+folderTest  = fullfile(outputFolder,"Test");
+
+%% Step 2. โหลดข้อมูลชุด Train
+trainFiles = dir(fullfile(folderTrain,"*.mat"));
+if isempty(trainFiles)
+    error("❌ ไม่พบไฟล์ .mat ในโฟลเดอร์ Train");
+end
+data = load(fullfile(trainFiles(1).folder, trainFiles(1).name));
+
+X = double(data.X);
+Y = double(data.Y);
+N = size(X,2);
+fprintf("Training data loaded: %d samples, %d features.\n", N, size(X,1));
+
+%% Step 3. Normalize manually
+xmin = min(X,[],2); xmax = max(X,[],2);
+Xn = (X - xmin)./(xmax - xmin + eps);
+ymin = min(Y,[],2); ymax = max(Y,[],2);
+Yn = (Y - ymin)./(ymax - ymin + eps);
+
+%% Step 4. Initialize multi-layer network (3 hidden layers)
+n_input = 5;
+n_hidden1 = 64;
+n_hidden2 = 32;
+n_hidden3 = 16;
+n_output = 1;
+
+rng(0);
+W1 = randn(n_hidden1,n_input)*0.1; b1 = zeros(n_hidden1,1);
+W2 = randn(n_hidden2,n_hidden1)*0.1; b2 = zeros(n_hidden2,1);
+W3 = randn(n_hidden3,n_hidden2)*0.1; b3 = zeros(n_hidden3,1);
+W4 = randn(n_output,n_hidden3)*0.1; b4 = zeros(n_output,1);
+
+%% Step 5. Adam optimizer parameters
+lr = 0.01;
+epochs = 400;
+beta1 = 0.9;
+beta2 = 0.999;
+eps_adam = 1e-8;
+
+% Initialize Adam moments
+mW1 = 0; vW1 = 0; mB1 = 0; vB1 = 0;
+mW2 = 0; vW2 = 0; mB2 = 0; vB2 = 0;
+mW3 = 0; vW3 = 0; mB3 = 0; vB3 = 0;
+mW4 = 0; vW4 = 0; mB4 = 0; vB4 = 0;
+
+%% Step 6. Training loop with real-time plot
+figure('Name','Training Progress');
+loss_hist = zeros(1,epochs);
+rmse_hist = zeros(1,epochs);
+
+for epoch = 1:epochs
+    % ---- Forward ----
+    Z1 = W1*Xn + b1; A1 = tanh(Z1);
+    Z2 = W2*A1 + b2; A2 = tanh(Z2);
+    Z3 = W3*A2 + b3; A3 = tanh(Z3);
+    Z4 = W4*A3 + b4; Yp = 1./(1+exp(-Z4));
+
+    % ---- Loss ----
+    loss = mean((Yn - Yp).^2);
+    rmse = sqrt(mean((Yn - Yp).^2))*100;
+    loss_hist(epoch) = loss;
+    rmse_hist(epoch) = rmse;
+
+    % ---- Backprop ----
+    dZ4 = 2*(Yp - Yn).*(Yp.*(1-Yp));
+    dW4 = dZ4*A3'/N; db4 = mean(dZ4,2);
+
+    dA3 = W4'*dZ4; dZ3 = dA3.*(1 - A3.^2);
+    dW3 = dZ3*A2'/N; db3 = mean(dZ3,2);
+
+    dA2 = W3'*dZ3; dZ2 = dA2.*(1 - A2.^2);
+    dW2 = dZ2*A1'/N; db2 = mean(dZ2,2);
+
+    dA1 = W2'*dZ2; dZ1 = dA1.*(1 - A1.^2);
+    dW1 = dZ1*Xn'/N; db1 = mean(dZ1,2);
+
+    % ---- Adam update ----
+    fields = {'W1','W2','W3','W4'};
+    grads = {dW1,dW2,dW3,dW4};
+    mVars = {'mW1','mW2','mW3','mW4'};
+    vVars = {'vW1','vW2','vW3','vW4'};
+    bVars = {'b1','b2','b3','b4'};
+    dbVars = {db1,db2,db3,db4};
+    mbVars = {'mB1','mB2','mB3','mB4'};
+    vbVars = {'vB1','vB2','vB3','vB4'};
+
+    for i=1:4
+        % Weights
+        eval(sprintf('%s = beta1*%s + (1-beta1)*grads{i};',mVars{i},mVars{i}));
+        eval(sprintf('%s = beta2*%s + (1-beta2)*(grads{i}.^2);',vVars{i},vVars{i}));
+        m_hat = eval(sprintf('%s/(1-beta1^epoch);',mVars{i}));
+        v_hat = eval(sprintf('%s/(1-beta2^epoch);',vVars{i}));
+        eval(sprintf('%s = %s - lr*m_hat./(sqrt(v_hat)+eps_adam);',fields{i},fields{i}));
+
+        % Bias
+        eval(sprintf('%s = beta1*%s + (1-beta1)*dbVars{i};',mbVars{i},mbVars{i}));
+        eval(sprintf('%s = beta2*%s + (1-beta2)*(dbVars{i}.^2);',vbVars{i},vbVars{i}));
+        m_hatb = eval(sprintf('%s/(1-beta1^epoch);',mbVars{i}));
+        v_hatb = eval(sprintf('%s/(1-beta2^epoch);',vbVars{i}));
+        eval(sprintf('%s = %s - lr*m_hatb./(sqrt(v_hatb)+eps_adam);',bVars{i},bVars{i}));
+    end
+
+    % ---- Learning rate schedule ----
+    if mod(epoch,100)==0
+        lr = lr * 0.5;
+    end
+
+    % ---- Display progress ----
+    if mod(epoch,20)==0
+        fprintf("Epoch %d/%d | Loss: %.6f | RMSE: %.3f%% | LR: %.4f\n", epoch, epochs, loss, rmse, lr);
+    end
+
+    % ---- Real-time plot ----
+    if mod(epoch,5)==0
+        subplot(2,1,1)
+        plot(loss_hist(1:epoch),'b','LineWidth',1.2); title('Loss'); grid on
+        subplot(2,1,2)
+        plot(rmse_hist(1:epoch),'r','LineWidth',1.2); title('RMSE (%)'); grid on
+        drawnow
+    end
+end
+
+%% Step 7. Test across all temperatures (-10,0,10,25°C)
+testFiles = dir(fullfile(folderTest,"*.mat"));
+temps = [-10,0,10,25];
+RMSE_all = zeros(1,numel(testFiles));
+MAXE_all = zeros(1,numel(testFiles));
+
+for i = 1:numel(testFiles)
+    dataTest = load(fullfile(testFiles(i).folder, testFiles(i).name));
+    Xt = double(dataTest.X); Yt = double(dataTest.Y);
+    Xt_n = (Xt - xmin)./(xmax - xmin + eps);
+    % Forward pass
+    Z1 = W1*Xt_n + b1; A1 = tanh(Z1);
+    Z2 = W2*A1 + b2; A2 = tanh(Z2);
+    Z3 = W3*A2 + b3; A3 = tanh(Z3);
+    Z4 = W4*A3 + b4; Yp_n = 1./(1+exp(-Z4));
+    Yp = Yp_n*(ymax - ymin) + ymin;
+
+    RMSE_all(i) = sqrt(mean((Yt - Yp).^2))*100;
+    MAXE_all(i) = max(abs(Yt - Yp))*100;
+
+    figure('Name',sprintf('Temperature %d°C',temps(i)))
+    plot(Yt,'b'); hold on; plot(Yp,'r--');
+    xlabel("Time step"); ylabel("SOC");
+    legend("Target","Predicted");
+    title(sprintf("SOC Prediction at %d°C",temps(i)));
+    grid on
+end
+
+%% Step 8. Display and save results
+fprintf("\nTemperature | RMSE(%%) | MaxErr(%%)\n");
+for i=1:numel(testFiles)
+    fprintf("%5d°C | %8.3f | %8.3f\n",temps(i),RMSE_all(i),MAXE_all(i));
+end
+
+T = table(temps',RMSE_all',MAXE_all','VariableNames',{'Temperature_C','RMSE_percent','MaxError_percent'});
+writetable(T,'RMSE_results.csv');
+disp("✅ Results saved to RMSE_results.csv");
+
+%% Step 9. Save Model
+save("advanced_basic_localdownload_soc_model.mat","W1","b1","W2","b2","W3","b3","W4","b4","xmin","xmax","ymin","ymax");
+disp("✅ Model saved as advanced_basic_localdownload_soc_model.mat");
